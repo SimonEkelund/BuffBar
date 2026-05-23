@@ -467,6 +467,7 @@ local function GetWeaponDialog()
     if weaponDlg then return weaponDlg end
     local dlg = CreateFrame("Frame", "BuffBarWeaponDialog", UIParent,
                             "BasicFrameTemplateWithInset")
+    tinsert(UISpecialFrames, "BuffBarWeaponDialog")
     dlg:SetSize(340, 140)
     dlg:SetPoint("CENTER")
     dlg:SetFrameStrata("DIALOG")

@@ -427,6 +427,7 @@ local function OpenTextDialog(title, body, initialText, mode, onAccept)
     if not textDlg then
         local dlg = CreateFrame("Frame", "BuffBarTextDialog", UIParent,
                                 "BasicFrameTemplateWithInset")
+        tinsert(UISpecialFrames, "BuffBarTextDialog")
         dlg:SetSize(460, 340)
         dlg:SetPoint("CENTER")
         -- Sit above the settings window (which uses DIALOG strata) so the
@@ -723,6 +724,8 @@ function Menu:Initialize()
     if self.frame then return end
 
     local frame = CreateFrame("Frame", "BuffBarMenu", UIParent, "BasicFrameTemplateWithInset")
+    -- Make Escape close the window (standard WoW behaviour for addon panels).
+    tinsert(UISpecialFrames, "BuffBarMenu")
     frame:SetSize(560, 620)
     frame:SetPoint("CENTER")
     frame:SetFrameStrata("DIALOG")
