@@ -257,11 +257,39 @@ function addon:SerializeProfile(name)
 end
 
 -- Returns (profileTable, errorString). Refuses anything missing our tag.
+-- We accept the BuffBarProfile: tag anywhere in the input and only consume
+-- the balanced {...} table that follows it — so the user can paste from a
+-- Discord message that includes extra text before or after the snippet and
+-- it still imports cleanly.
 function addon:DeserializeProfile(text)
     if type(text) ~= "string" then return nil, "no text" end
-    text = text:gsub("^%s+", ""):gsub("%s+$", "")
-    local body = text:match("^BuffBarProfile:(.+)$")
-    if not body then return nil, "missing BuffBarProfile: header" end
+    local tagStart = text:find("BuffBarProfile:", 1, true)
+    if not tagStart then return nil, "missing BuffBarProfile: header" end
+    local braceStart = text:find("{", tagStart, true)
+    if not braceStart then return nil, "no profile data found" end
+
+    -- Walk forward tracking brace depth. Respect Lua string literals so a
+    -- "}" inside a quoted item name doesn't close the table early.
+    local depth, braceEnd, inString, escape = 0, nil, false, false
+    for i = braceStart, #text do
+        local c = text:sub(i, i)
+        if escape then
+            escape = false
+        elseif c == "\\" then
+            escape = true
+        elseif c == '"' then
+            inString = not inString
+        elseif not inString then
+            if     c == "{" then depth = depth + 1
+            elseif c == "}" then
+                depth = depth - 1
+                if depth == 0 then braceEnd = i; break end
+            end
+        end
+    end
+    if not braceEnd then return nil, "unmatched braces" end
+
+    local body = text:sub(braceStart, braceEnd)
     local fn, err = loadstring("return " .. body)
     if not fn then return nil, "parse error: " .. tostring(err) end
     local ok, result = pcall(fn)
