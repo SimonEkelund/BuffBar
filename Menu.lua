@@ -429,7 +429,10 @@ local function OpenTextDialog(title, body, initialText, mode, onAccept)
                                 "BasicFrameTemplateWithInset")
         dlg:SetSize(460, 340)
         dlg:SetPoint("CENTER")
-        dlg:SetFrameStrata("DIALOG")
+        -- Sit above the settings window (which uses DIALOG strata) so the
+        -- export/import popup is never hidden behind it.
+        dlg:SetFrameStrata("FULLSCREEN_DIALOG")
+        dlg:SetToplevel(true)
         dlg:SetMovable(true)
         dlg:EnableMouse(true)
         dlg:RegisterForDrag("LeftButton")
@@ -517,6 +520,7 @@ local function OpenTextDialog(title, body, initialText, mode, onAccept)
     end
 
     textDlg:Show()
+    textDlg:Raise()      -- bring above any sibling DIALOG-strata frames
 end
 
 local CreateProfileContent
