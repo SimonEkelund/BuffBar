@@ -2,7 +2,7 @@
 ## Title: BuffBar
 ## Notes: Drag-to-track consumables for raid
 ## Author: bjorn
-## Version: 0.1
+## Version: 1.0
 ## SavedVariables: BuffBarDB
 
 Core.lua
