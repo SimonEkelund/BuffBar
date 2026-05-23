@@ -1,0 +1,11 @@
+## Interface: 20504
+## Title: BuffBar
+## Notes: Drag-to-track consumables for raid
+## Author: bjorn
+## Version: 0.1
+## SavedVariables: BuffBarDB
+
+Core.lua
+Bar.lua
+AddZone.lua
+Menu.lua

@@ -1,0 +1,8 @@
+# Local-only artefacts
+*.zip
+BuffBar_unpack/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
