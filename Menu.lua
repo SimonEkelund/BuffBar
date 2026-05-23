@@ -6,9 +6,8 @@ local Menu   = addon.Menu
 local HELP_TEXT =
     "|cff7fd5ffHow to use|r\n" ..
     "  - Drag a consumable from your bag onto the |cffffd700+|r slot to start tracking it\n" ..
-    "  - |cffffffffUnlocked|r: right-click a slot to remove it from the bar\n" ..
-    "  - |cffffffffUnlocked|r: left-drag a slot to reorder; drag far outside the bar to remove\n" ..
-    "  - |cffffffffLocked|r: right-click a slot to use that item\n" ..
+    "  - |cffffffffRight-click|r a slot to consume one of that item (any mode)\n" ..
+    "  - When |cffffffffunlocked|r: left-drag a slot to reorder; drag it far outside the bar to remove\n" ..
     "  - When unlocked, |cffffffffdrag the grip|r (the dotted handle on the left) to move the bar\n" ..
     "  - Use the |cffffffffLock bar|r button at the top of this menu to hide the grip and + button\n" ..
     "  - The slot stays full-color while the buff is up, fades when missing\n" ..

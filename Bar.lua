@@ -44,7 +44,6 @@ end
 local function SlotPreClick(self, button)
     if button ~= "RightButton" or not self.itemID then return end
     if self.weaponSlot then return end
-    if not BuffBarDB.locked then return end  -- no item use in edit mode
     local snapshot = {}
     for i = 1, 40 do
         local name, _, _, _, _, expiration = UnitBuff("player", i)
@@ -56,15 +55,11 @@ local function SlotPreClick(self, button)
 end
 
 local function SlotPostClick(self, button, down)
-    -- PostClick fires twice per physical click (down + up) because we register
-    -- for both AnyUp and AnyDown to handle the ActionButtonUseKeyDown CVar.
-    -- Filter to the up event so a single click triggers exactly one removal.
-    if down then return end
-    -- Right-click removes only in edit mode (unlocked); in play mode (locked)
-    -- the secure type2 macro handles item use instead.
-    if button == "RightButton" and not BuffBarDB.locked and not InCombatLockdown() then
-        addon:RemoveItem(self.slotIndex)
-    end
+    -- Click handling is now uniform across lock states:
+    --   * Right-click → consume (the secure type2 macro does this, set in
+    --     Rebuild and always active when the slot has data)
+    --   * Removal     → drag-far-from-bar (SlotOnDragStop), unlocked only
+    -- PostClick is a no-op here; it stays defined for symmetry/future use.
 end
 
 -- ─── drag-to-sort / drag-to-remove ───────────────────────────────────────────
@@ -343,10 +338,9 @@ function Bar:Rebuild()
                 end
             end
 
-            -- Secure click: RIGHT button (type2) runs /use only when the bar is
-            -- locked (play mode). In edit mode (unlocked) right-click removes
-            -- the slot via PostClick instead, so the macro must not be set.
-            if name and BuffBarDB.locked then
+            -- Secure click: RIGHT button (type2) always runs /use, regardless
+            -- of lock state. Removal is handled by drag-out (see DragStop).
+            if name then
                 local macro = "/use " .. name
                 -- All slot-targeted items use the same two-line macro form:
                 -- the first /use puts the item on the cursor, the second
