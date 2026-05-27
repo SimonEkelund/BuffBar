@@ -4,6 +4,7 @@
 ## Author: bjorn
 ## Version: 1.0
 ## SavedVariables: BuffBarDB
+## SavedVariablesPerCharacter: BuffBarCharDB
 
 Core.lua
 Bar.lua

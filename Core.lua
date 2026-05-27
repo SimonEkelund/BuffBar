@@ -141,6 +141,30 @@ local function ensureDefaults()
         end
         BuffBarDB.profiles[BuffBarDB.activeProfile] = snap
     end
+
+    -- Per-character active profile. Stored in BuffBarCharDB so each char
+    -- on the account remembers its own choice independently. On first run
+    -- after this change the char inherits whatever the account-wide active
+    -- was, so nothing visually moves until they pick their own.
+    BuffBarCharDB = BuffBarCharDB or {}
+    if not BuffBarCharDB.activeProfile then
+        BuffBarCharDB.activeProfile = BuffBarDB.activeProfile or "Default"
+    end
+    -- If this char points at a profile that's been deleted (e.g. by another
+    -- character on the account), fall back to any remaining one, recreating
+    -- "Default" from current live state if the library is empty.
+    if not BuffBarDB.profiles[BuffBarCharDB.activeProfile] then
+        local fallback = next(BuffBarDB.profiles)
+        if not fallback then
+            fallback = "Default"
+            local snap = {}
+            for _, key in ipairs(PROFILE_KEYS) do
+                snap[key] = deepCopy(BuffBarDB[key])
+            end
+            BuffBarDB.profiles[fallback] = snap
+        end
+        BuffBarCharDB.activeProfile = fallback
+    end
 end
 
 -- ─── profile management ───────────────────────────────────────────────────────
@@ -157,7 +181,11 @@ function addon:ProfileList()
 end
 
 function addon:ActiveProfile()
-    return BuffBarDB.activeProfile or "Default"
+    -- Per-character; falls back to the legacy account-wide value during the
+    -- very first frame before ensureDefaults() has run.
+    return (BuffBarCharDB and BuffBarCharDB.activeProfile)
+        or (BuffBarDB and BuffBarDB.activeProfile)
+        or "Default"
 end
 
 -- Save the CURRENT live settings into the named profile (overwrites).
@@ -169,8 +197,29 @@ function addon:SaveProfile(name)
         snap[k] = deepCopy(BuffBarDB[k])
     end
     BuffBarDB.profiles[name] = snap
-    BuffBarDB.activeProfile  = name
+    BuffBarCharDB.activeProfile = name
     self:Print("Saved profile '" .. name .. "'.")
+end
+
+-- Internal: copy a profile snapshot into the live state and re-apply
+-- everything (position, alpha, layout, font, visibility). Used by LoadProfile
+-- and by the PLAYER_LOGIN handler so both paths apply identically.
+function addon:_ApplyProfileSnapshot(snap)
+    if not snap then return end
+    for _, k in ipairs(PROFILE_KEYS) do
+        if snap[k] ~= nil then BuffBarDB[k] = deepCopy(snap[k]) end
+    end
+    if BuffBar.Bar.frame then
+        local pt = BuffBarDB.point
+        if pt then
+            BuffBar.Bar.frame:ClearAllPoints()
+            BuffBar.Bar.frame:SetPoint(pt[1], UIParent, pt[3], pt[4], pt[5])
+        end
+        BuffBar.Bar.frame:SetAlpha(BuffBarDB.alpha or 1.0)
+    end
+    BuffBar.Bar:Rebuild()
+    BuffBar.Bar:ApplyFont()
+    BuffBar.Bar:UpdateVisibility()
 end
 
 -- Replace the live settings with a saved snapshot, then re-apply the bar.
@@ -184,22 +233,8 @@ function addon:LoadProfile(name)
         self:Print("No profile named '" .. tostring(name) .. "'.")
         return
     end
-    for _, k in ipairs(PROFILE_KEYS) do
-        if p[k] ~= nil then BuffBarDB[k] = deepCopy(p[k]) end
-    end
-    BuffBarDB.activeProfile = name
-    -- Re-apply everything that changed
-    if BuffBar.Bar.frame then
-        local pt = BuffBarDB.point
-        if pt then
-            BuffBar.Bar.frame:ClearAllPoints()
-            BuffBar.Bar.frame:SetPoint(pt[1], UIParent, pt[3], pt[4], pt[5])
-        end
-        BuffBar.Bar.frame:SetAlpha(BuffBarDB.alpha or 1.0)
-    end
-    BuffBar.Bar:Rebuild()
-    BuffBar.Bar:ApplyFont()
-    BuffBar.Bar:UpdateVisibility()
+    self:_ApplyProfileSnapshot(p)
+    BuffBarCharDB.activeProfile = name
     self:Print("Loaded profile '" .. name .. "'.")
 end
 
@@ -217,7 +252,7 @@ function addon:CreateProfile(name)
         snap[k] = deepCopy(BuffBarDB[k])
     end
     BuffBarDB.profiles[name] = snap
-    BuffBarDB.activeProfile  = name
+    BuffBarCharDB.activeProfile = name
     self:Print("Created profile '" .. name .. "' (active).")
 end
 
@@ -328,10 +363,11 @@ function addon:DeleteProfile(name)
         return
     end
     BuffBarDB.profiles[name] = nil
-    if BuffBarDB.activeProfile == name then
-        -- Fall back to any remaining profile
+    -- Only this character's active pointer needs an update; other chars on the
+    -- account will fall back lazily via ensureDefaults() next time they log in.
+    if BuffBarCharDB.activeProfile == name then
         for other in pairs(BuffBarDB.profiles) do
-            BuffBarDB.activeProfile = other
+            BuffBarCharDB.activeProfile = other
             break
         end
     end
@@ -583,7 +619,12 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         ensureDefaults()
         BuffBar.Bar:Initialize()
         BuffBar.AddZone:Initialize()
-        BuffBar.Bar:Rebuild()
+        -- Apply THIS character's active profile into the live state so it
+        -- starts on its own snapshot, not on whatever the previously logged
+        -- character last left in BuffBarDB.
+        local target = addon:ActiveProfile()
+        local snap   = BuffBarDB.profiles and BuffBarDB.profiles[target]
+        addon:_ApplyProfileSnapshot(snap)
         BuffBar.Bar:UpdateVisibility()
 
     elseif event == "PLAYER_ENTERING_WORLD" then
