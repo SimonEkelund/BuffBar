@@ -55,11 +55,17 @@ local function SlotPreClick(self, button)
 end
 
 local function SlotPostClick(self, button, down)
-    -- Click handling is now uniform across lock states:
-    --   * Right-click → consume (the secure type2 macro does this, set in
-    --     Rebuild and always active when the slot has data)
-    --   * Removal     → drag-far-from-bar (SlotOnDragStop), unlocked only
-    -- PostClick is a no-op here; it stays defined for symmetry/future use.
+    -- Click handling per button:
+    --   * Right-click  → consume (secure type2 macro, set in Rebuild)
+    --   * Left-drag    → reorder / remove (unlocked only, SlotOnDragStop)
+    --   * Middle-click → open settings (F5) — works even when locked, so you
+    --     never have to type /bb. Middle isn't bound to any secure action, so
+    --     handling it here has no protected side effects. Fire once (on down).
+    if button == "MiddleButton" and down then
+        if BuffBar.Menu and BuffBar.Menu.Toggle then
+            BuffBar.Menu:Toggle()
+        end
+    end
 end
 
 -- ─── drag-to-sort / drag-to-remove ───────────────────────────────────────────
@@ -279,6 +285,7 @@ function Bar:Initialize()
         GameTooltip:SetOwner(g, "ANCHOR_TOP")
         GameTooltip:SetText("Drag to move")
         GameTooltip:AddLine("Lock the bar from /bb settings", 0.7, 0.7, 0.7)
+        GameTooltip:AddLine("Middle-click any icon to open settings", 0.7, 0.7, 0.7)
         GameTooltip:Show()
     end)
     grip:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -319,7 +326,7 @@ function Bar:Rebuild()
             btn.spellName  = entry.spellName
             btn.weaponSlot = entry.slot    -- 16 / 17 / nil
 
-            local name, link, _, _, _, _, _, _, _, icon = GetItemInfo(entry.itemID)
+            local name, link, _, _, _, _, subType, _, _, icon = GetItemInfo(entry.itemID)
             if icon then
                 btn.icon:SetTexture(icon)
             else
@@ -327,6 +334,18 @@ function Bar:Rebuild()
                 addon.pendingItems[entry.itemID] = true
             end
             btn.labelFS:SetText(addon:ShortLabel(name or ""))
+
+            -- Mark food slots so the eating-countdown placeholder (F3) knows
+            -- which icons to show the eat timer on, independent of how the food
+            -- was eaten (bar icon, bag, keybind, …). _sitTime is read straight
+            -- from the item tooltip ("spend at least N seconds eating"), so the
+            -- countdown is exact per food — defaulting to 10s if not yet cached.
+            btn._isFood = (subType == "Food & Drink")
+            if btn._isFood then
+                btn._sitTime = addon:GetFoodSitTime(entry.itemID) or 10
+            else
+                btn._sitTime = nil
+            end
 
             -- Only fall back to GetItemSpell if we have nothing yet.
             -- Once auto-detection has bound the real buff name, don't overwrite it.
@@ -454,6 +473,21 @@ end
 --   * Reposition the bar so the FIRST SLOT stays at the same screen pixel
 --     across toggles (so toggling doesn't make your tracked items "jump")
 function Bar:ApplyLockState()
+    -- LayoutSlots (called below) shows/hides/moves the slot buttons, which are
+    -- SECURE frames. WoW blocks that during combat lockdown and aborts the
+    -- whole layout, collapsing the bar. Never touch them in combat — defer the
+    -- entire re-layout until combat ends. (Deduped so we queue at most once.)
+    if InCombatLockdown() then
+        if not self._applyQueued then
+            self._applyQueued = true
+            table.insert(addon.combatQueue, function()
+                Bar._applyQueued = nil
+                Bar:ApplyLockState()
+            end)
+        end
+        return
+    end
+
     local locked = BuffBarDB.locked
     local orient = BuffBarDB.orientation or "horizontal"
 
@@ -481,19 +515,31 @@ function Bar:ApplyLockState()
     local n = self:LayoutSlots()
     local slotsLen = n * sz + math.max(0, n - 1) * SLOT_GAP
 
-    -- Where does the first slot currently sit, in absolute screen coords?
-    -- (We pin THIS point — not the bar's TOPLEFT — so locking/unlocking and
-    -- the grip appearing/disappearing don't shift any tracked icons.)
-    local prevLead = LeadingOffset(self._lastLocked == nil and locked or self._lastLocked)
+    -- Pin a reference point across layouts so the icons never jump when you
+    -- lock/unlock or when a buff hides:
+    --   * Left-align  → pin the LEADING EDGE (first slot stays put, the row
+    --                   shrinks from the right).
+    --   * Center      → pin the row's CENTRE (icons stay centred and the row
+    --                   shortens symmetrically toward the middle).
+    -- We measure the reference from the CURRENT on-screen geometry (previous
+    -- lead + previous visible count) before resizing, then reposition so that
+    -- same reference lands in the same screen spot.
+    local centered     = BuffBarDB.centered == true
+    local prevLead     = LeadingOffset(self._lastLocked == nil and locked or self._lastLocked)
+    local prevN        = self._lastN or n
+    local prevSlotsLen = prevN * sz + math.max(0, prevN - 1) * SLOT_GAP
+    local prevHalf     = centered and (prevSlotsLen / 2) or 0
+    local newHalf      = centered and (slotsLen / 2) or 0
+
     local barLeft, barTop = self.frame:GetLeft(), self.frame:GetTop()
-    local contentLeft, contentTop
+    local refMain, refCross
     if barLeft and barTop then
         if orient == "horizontal" then
-            contentLeft = barLeft + prevLead
-            contentTop  = barTop
+            refMain  = barLeft + prevLead + prevHalf
+            refCross = barTop
         else
-            contentLeft = barLeft
-            contentTop  = barTop - prevLead
+            refMain  = barTop - prevLead - prevHalf
+            refCross = barLeft
         end
     end
 
@@ -517,15 +563,15 @@ function Bar:ApplyLockState()
     -- Apply alpha (transparency slider)
     self.frame:SetAlpha(BuffBarDB.alpha or 1.0)
 
-    -- Re-anchor so the first slot's screen position is preserved
-    if contentLeft and contentTop then
+    -- Re-anchor so the pinned reference keeps its screen position
+    if refMain and refCross then
         local newBarLeft, newBarTop
         if orient == "horizontal" then
-            newBarLeft = contentLeft - newLead
-            newBarTop  = contentTop
+            newBarLeft = refMain - newLead - newHalf
+            newBarTop  = refCross
         else
-            newBarLeft = contentLeft
-            newBarTop  = contentTop + newLead
+            newBarTop  = refMain + newLead + newHalf
+            newBarLeft = refCross
         end
         self.frame:ClearAllPoints()
         self.frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT",
@@ -533,6 +579,8 @@ function Bar:ApplyLockState()
         BuffBarDB.point = { "TOPLEFT", "UIParent", "BOTTOMLEFT",
             math.floor(newBarLeft), math.floor(newBarTop) }
     end
+
+    self._lastN = n
 
     -- AddZone (positioned after the LAST visible slot, not after total #items)
     if addon.AddZone and addon.AddZone.frame then
@@ -560,7 +608,7 @@ function Bar:RefreshSlot(btn)
 
     if showLabel then btn.labelFS:Show() else btn.labelFS:Hide() end
 
-    -- Bag count
+    -- Bag count (number of items / oil bottles you hold)
     local cnt = GetItemCount(btn.itemID) or 0
     if showCount then
         btn.countFS:SetText(tostring(cnt))
@@ -585,9 +633,31 @@ function Bar:RefreshSlot(btn)
     end
 
     local showRed = BuffBarDB.showRedOverlay == true
+    local now     = GetTime()
+    local buffUp  = active and expiration and (expiration - now) > 0
+
+    -- Eating placeholder (F3): while the player is eating and Well Fed hasn't
+    -- landed yet, count down the seconds left until you become Well Fed
+    -- (eatStart + the food's required sit time, read from its tooltip). Set
+    -- globally in DetectNewBuff, so this works no matter how the food was eaten.
+    -- The real buff takes over the instant it lands (then hides if "Hide when
+    -- active" is on); if you stand up early the countdown clears on its own.
+    if btn._isFood and not buffUp and self._eatStart and self._eatUntil
+       and now < self._eatUntil then
+        local rem = (self._eatStart + (btn._sitTime or 10)) - now
+        if rem < 0 then rem = 0 end
+        -- Always shown, even when "show duration" is off — this is a transient
+        -- "keep sitting" prompt, not the normal buff timer, so it deliberately
+        -- writes over that setting until Well Fed lands.
+        btn.durFS:SetText(FormatDuration(rem))
+        btn.durFS:SetTextColor(1, 1, 1)
+        btn.overlay:Hide()
+        btn.icon:SetDesaturated(false)
+        return
+    end
 
     if btn.weaponSlot or btn.spellName then
-        if active and expiration and (expiration - GetTime()) > 0 then
+        if buffUp then
             local rem = expiration - GetTime()
             if showDuration then
                 btn.durFS:SetText(FormatDuration(rem))
@@ -618,11 +688,45 @@ function Bar:RefreshSlot(btn)
     end
 end
 
+-- Briefly highlight a slot so the user can SEE where an already-tracked item
+-- lives (used when an add is rejected as a duplicate — e.g. an imported profile
+-- already had the rune and the icon was a faint "?" they didn't notice).
+function Bar:FlashSlot(index)
+    local btn = self.slots and self.slots[index]
+    if not btn or not btn.dropHL or not btn:IsShown() then return end
+    btn.dropHL:Show()
+    if C_Timer and C_Timer.After then
+        C_Timer.After(1.2, function()
+            if btn.dropHL then btn.dropHL:Hide() end
+        end)
+    end
+end
+
+-- A compact string describing which slots WOULD be visible right now, using the
+-- same predicate as LayoutSlots. We only pay for a full re-layout when this
+-- actually changes (a buff came up / dropped), instead of on every aura tick.
+function Bar:_VisibleSignature()
+    local hideActive = BuffBarDB.hideWhenActive
+    local parts = {}
+    for _, btn in ipairs(self.slots) do
+        if btn.itemID then
+            local hidden = hideActive and self:IsBuffActive(btn)
+            parts[#parts + 1] = (btn.slotIndex or 0) .. (hidden and "h" or "v")
+        end
+    end
+    return table.concat(parts, ",")
+end
+
 function Bar:RefreshAll()
-    -- When hideWhenActive is on, buff state changes alter the layout — re-run
-    -- ApplyLockState so slots compress/expand in real time.
+    -- When hideWhenActive is on, buff state changes can alter the layout. Only
+    -- re-run ApplyLockState when the visible set actually changed — and never in
+    -- combat (ApplyLockState self-defers, but skipping here avoids the churn).
     if BuffBarDB.hideWhenActive then
-        self:ApplyLockState()
+        local sig = self:_VisibleSignature()
+        if sig ~= self._lastVisSig then
+            self._lastVisSig = sig
+            self:ApplyLockState()
+        end
     end
     for _, btn in ipairs(self.slots) do
         if btn:IsShown() then self:RefreshSlot(btn) end
@@ -686,8 +790,46 @@ end
 -- coincidentally lands during the window.
 local SNAPSHOT_WINDOW = 25
 
+-- Transient "you are currently eating/drinking" buffs. These land the instant
+-- you start eating (a few seconds long) and must NEVER be what a food slot
+-- binds to — we want the real "Well Fed" buff that arrives ~10s later. Without
+-- this blacklist the slot would briefly track "Food", then flip to red/expired
+-- the moment you stand up.
+local EATING_BUFFS = {
+    ["Food"]        = true,
+    ["Drink"]       = true,
+    ["Food & Drink"] = true,
+    ["Refreshment"] = true,
+}
+
 function Bar:DetectNewBuff()
     local now = GetTime()
+
+    -- Global eat-window detection (F3), independent of HOW you started eating.
+    -- If a transient eating aura is on the player, work out when eating BEGAN
+    -- (expiration - duration of the aura) so any food slot can count down to
+    -- Well Fed — even if you ate from the bag/a keybind and never touched the
+    -- BuffBar icon. Both are cleared the moment the aura is gone.
+    local eatUntil, eatStart = nil, nil
+    for i = 1, 40 do
+        local name, _, _, _, duration, expiration = UnitBuff("player", i)
+        if not name then break end
+        if EATING_BUFFS[name] and expiration and expiration > now then
+            if not eatUntil or expiration > eatUntil then
+                eatUntil = expiration
+                -- Exact start when the aura reports a duration; otherwise fall
+                -- back to the first moment we noticed eating (stable across ticks).
+                if duration and duration > 0 then
+                    eatStart = expiration - duration
+                else
+                    eatStart = self._eatStart or now
+                end
+            end
+        end
+    end
+    self._eatUntil = eatUntil
+    self._eatStart = eatStart
+
     for _, btn in ipairs(self.slots) do
         if not btn._buffSnapshot or not btn.slotIndex then
             -- skip
@@ -708,11 +850,16 @@ function Bar:DetectNewBuff()
                 local fresh    = (snapExp == nil) or
                                  (expiration and expiration > snapExp + 1)
                 local selfCast = (source == "player" or source == nil)
-                if fresh and selfCast and expiration and expiration > bestExp then
+                if fresh and selfCast and not EATING_BUFFS[name]
+                   and expiration and expiration > bestExp then
                     bestName = name
                     bestExp  = expiration
                 end
             end
+
+            -- A slot that binds to "Well Fed" is definitely a food slot, even
+            -- if GetItemInfo's subtype check missed it.
+            if bestName == "Well Fed" then btn._isFood = true end
 
             -- Only update + announce when we actually change the binding.
             if bestName and bestName ~= btn.spellName then

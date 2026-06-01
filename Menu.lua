@@ -7,6 +7,7 @@ local HELP_TEXT =
     "|cff7fd5ffHow to use|r\n" ..
     "  - Drag a consumable from your bag onto the |cffffd700+|r slot to start tracking it\n" ..
     "  - |cffffffffRight-click|r a slot to consume one of that item (any mode)\n" ..
+    "  - |cffffffffMiddle-click|r any icon to open this settings window (works even when locked)\n" ..
     "  - When |cffffffffunlocked|r: left-drag a slot to reorder; drag it far outside the bar to remove\n" ..
     "  - When unlocked, |cffffffffdrag the grip|r (the dotted handle on the left) to move the bar\n" ..
     "  - Use the |cffffffffLock bar|r button at the top of this menu to hide the grip and + button\n" ..
@@ -313,9 +314,18 @@ CreateConfigContent = function(parent, sidebar)
             BuffBar.Bar:Rebuild()
         end)
 
+    Menu.centeredCheck = MakeCheck(content, "BuffBarCenteredCheck",
+        "Keep icons centered (row shrinks symmetrically)",
+        { frame = Menu.verticalCheck, point = "BOTTOMLEFT", x = 0, y = -4 },
+        function(self)
+            BuffBarDB.centered = self:GetChecked() and true or false
+            BuffBar.Bar:ApplyLockState()
+            BuffBar.Bar:RefreshAll()
+        end)
+
     -- ─── Display section ─────────────────────────────────────────────
     local dh = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    dh:SetPoint("TOPLEFT", Menu.verticalCheck, "BOTTOMLEFT", 0, -14)
+    dh:SetPoint("TOPLEFT", Menu.centeredCheck, "BOTTOMLEFT", 0, -14)
     dh:SetText("Display")
     dh:SetTextColor(1, 0.82, 0)
 
@@ -767,6 +777,9 @@ end
 function Menu:Refresh()
     if self.verticalCheck then
         self.verticalCheck:SetChecked(BuffBarDB.orientation == "vertical")
+    end
+    if self.centeredCheck then
+        self.centeredCheck:SetChecked(BuffBarDB.centered == true)
     end
     if self.lockBtn and self.lockBtn._updateText then
         self.lockBtn._updateText()

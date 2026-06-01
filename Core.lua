@@ -17,6 +17,7 @@ local defaults = {
     iconSize       = 28,
     showLabel      = true,
     instancesOnly  = false,
+    centered       = false,         -- keep icons centred (row shrinks symmetrically)
     font           = "Fonts\\FRIZQT__.TTF",
     activeProfile  = "Default",
     profiles       = nil,            -- created on first run, see ensureProfiles
@@ -27,7 +28,7 @@ local defaults = {
 local PROFILE_KEYS = {
     "items", "point", "locked", "orientation",
     "showCount", "showDuration", "showRedOverlay", "hideWhenActive",
-    "alpha", "iconSize", "showLabel", "instancesOnly", "font",
+    "alpha", "iconSize", "showLabel", "instancesOnly", "centered", "font",
 }
 
 -- Words we DROP from the item name before picking a label.
@@ -463,9 +464,31 @@ function addon:GetChestEnchantState()
     return false
 end
 
+-- Read a food item's required eating time from its tooltip. Well-Fed foods
+-- render a line like "If you spend at least 10 seconds eating you will become
+-- well fed…" — we pull that number so the eat-window countdown is exact and
+-- auto-detected per food, with no manual entry. Returns seconds, or nil if the
+-- item isn't a Well-Fed food (or its tooltip isn't cached yet).
+function addon:GetFoodSitTime(itemID)
+    local _, link = GetItemInfo(itemID)
+    if not link then return nil end
+    local tip = GetScanTip()
+    tip:ClearLines()
+    tip:SetHyperlink(link)
+    for i = 1, tip:NumLines() do
+        local fs   = _G["BuffBarScanTipTextLeft" .. i]
+        local text = fs and fs:GetText()
+        if text then
+            local n = text:match("spend at least (%d+)")
+            if n then return tonumber(n) end
+        end
+    end
+    return nil
+end
+
 function addon:HasItem(itemID)
-    for _, it in ipairs(BuffBarDB.items) do
-        if it.itemID == itemID then return true end
+    for i, it in ipairs(BuffBarDB.items) do
+        if it.itemID == itemID then return true, i end
     end
     return false
 end
@@ -550,8 +573,18 @@ end
 
 function addon:AddItem(itemID)
     if not itemID then return end
-    if self:HasItem(itemID) then
-        self:Print("Already tracking that item.")
+    local has, atIndex = self:HasItem(itemID)
+    if has then
+        -- Already on the bar. This is most confusing when the icon is a faint
+        -- "?" (item not in your client cache yet) or desaturated at 0 count —
+        -- e.g. an imported profile that already had this rune. Flash the slot
+        -- so it's obvious where it already lives instead of a silent refusal.
+        local dragName = GetItemInfo(itemID) or ("item " .. tostring(itemID))
+        self:Print(("%s is already on your bar (slot %d).")
+            :format(tostring(dragName), atIndex or -1))
+        if BuffBar.Bar and BuffBar.Bar.FlashSlot and atIndex then
+            BuffBar.Bar:FlashSlot(atIndex)
+        end
         return
     end
 
@@ -704,6 +737,20 @@ SlashCmdList.BUFFBAR = function(msg)
         BuffBarDB.items = {}
         BuffBar.Bar:Rebuild()
         addon:Print("Cleared all tracked items.")
+    elseif msg == "auras" then
+        -- Diagnostic: dump every buff currently on the player with its name,
+        -- remaining duration and caster. Eat food, wait ~3s, then run /bb auras
+        -- so we can see what the eating aura is actually called in this client.
+        local now = GetTime()
+        addon:Print("---- player buffs ----")
+        for i = 1, 40 do
+            local name, _, _, _, duration, expiration, source = UnitBuff("player", i)
+            if not name then break end
+            local rem = (expiration and expiration > 0) and (expiration - now) or 0
+            addon:Print(string.format("%d: %s | dur=%s exp_in=%.0fs | src=%s",
+                i, tostring(name), tostring(duration or 0), rem, tostring(source)))
+        end
+        addon:Print("----------------------")
     else
         -- no args (or unknown args) → open the menu
         BuffBar.Menu:Toggle()
