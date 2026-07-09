@@ -379,9 +379,17 @@ CreateConfigContent = function(parent, sidebar)
             BuffBar.Bar:UpdateVisibility()
         end)
 
+    Menu.hideCheck = MakeCheck(content, "BuffBarHideCheck",
+        "Hide the bar (also /bb hide and /bb show)",
+        { frame = Menu.instanceCheck, point = "BOTTOMLEFT", x = 0, y = -4 },
+        function(self)
+            BuffBarDB.hidden = self:GetChecked() and true or false
+            BuffBar.Bar:UpdateVisibility()
+        end)
+
     -- Appearance header
     local sh = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    sh:SetPoint("TOPLEFT", Menu.instanceCheck, "BOTTOMLEFT", 0, -18)
+    sh:SetPoint("TOPLEFT", Menu.hideCheck, "BOTTOMLEFT", 0, -18)
     sh:SetText("Appearance")
     sh:SetTextColor(1, 0.82, 0)
 
@@ -801,6 +809,9 @@ function Menu:Refresh()
     end
     if self.instanceCheck then
         self.instanceCheck:SetChecked(BuffBarDB.instancesOnly == true)
+    end
+    if self.hideCheck then
+        self.hideCheck:SetChecked(BuffBarDB.hidden == true)
     end
     if self.alphaSlider and self.alphaSlider.slider then
         self.alphaSlider.slider:SetValue(BuffBarDB.alpha or 1.0)

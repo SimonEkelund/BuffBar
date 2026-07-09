@@ -1,4 +1,4 @@
-## Interface: 20504
+## Interface: 20506
 ## Title: BuffBar
 ## Notes: Drag-to-track consumables for raid
 ## Author: bjorn

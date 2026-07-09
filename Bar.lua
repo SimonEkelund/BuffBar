@@ -52,6 +52,11 @@ local function SlotPreClick(self, button)
     end
     self._buffSnapshot = snapshot
     self._snapshotTime = GetTime()
+    -- Bag count at click time. DetectNewBuff refuses to rebind unless this
+    -- DROPS — proof the click actually consumed the item. Without that gate,
+    -- any random proc (trinket, weapon, Battle Shout refresh…) landing inside
+    -- the 25s window after a stray right-click hijacks the slot's binding.
+    self._snapCount = GetItemCount(self.itemID) or 0
 end
 
 local function SlotPostClick(self, button, down)
@@ -238,6 +243,18 @@ local function CreateSlot(i)
     labelFS:SetTextColor(0.95, 0.95, 0.95)
     btn.labelFS = labelFS
 
+    -- Insecure overlay that swallows all mouse input while the slot is
+    -- alpha-hidden. An alpha-0 frame STILL receives clicks, and right-click is
+    -- the secure /use binding — so without this, camera right-clicks over an
+    -- invisible slot silently consume the item. Show/Hide on this frame is
+    -- combat-safe because it is not protected (the secure button is).
+    local blocker = CreateFrame("Frame", nil, btn)
+    blocker:SetAllPoints(btn)
+    blocker:SetFrameLevel(btn:GetFrameLevel() + 10)
+    blocker:EnableMouse(true)
+    blocker:Hide()
+    btn.blocker = blocker
+
     btn:SetScript("OnUpdate",  SlotOnUpdate)
     btn:SetScript("PreClick",  SlotPreClick)
     btn:SetScript("PostClick", SlotPostClick)
@@ -255,7 +272,15 @@ function Bar:Initialize()
     frame:SetMovable(true)
     frame:EnableMouse(false)
     frame:SetSize(SlotSize() + PADDING * 2, SlotSize() + PADDING * 2)
+    -- A corrupted saved point would make SetPoint throw DURING login init,
+    -- killing the rest of the addon's setup — the bar then never appears at
+    -- all. Validate and fall back to the default position instead.
     local p = BuffBarDB.point
+    if type(p) ~= "table" or type(p[1]) ~= "string"
+       or type(p[4]) ~= "number" or type(p[5]) ~= "number" then
+        p = { "CENTER", "UIParent", "CENTER", 0, -200 }
+        BuffBarDB.point = p
+    end
     frame:SetPoint(p[1], UIParent, p[3], p[4], p[5])
     self.frame = frame
 
@@ -274,9 +299,15 @@ function Bar:Initialize()
     grip:EnableMouse(true)
     grip:RegisterForDrag("LeftButton")
     grip:SetScript("OnDragStart", function()
-        if not BuffBarDB.locked then frame:StartMoving() end
+        -- StartMoving on a frame with secure children is blocked in combat
+        -- (confirmed ADDON_ACTION_BLOCKED in the error log) — don't try.
+        if BuffBarDB.locked or InCombatLockdown() then return end
+        grip._moving = true
+        frame:StartMoving()
     end)
     grip:SetScript("OnDragStop", function()
+        if not grip._moving then return end
+        grip._moving = nil
         frame:StopMovingOrSizing()
         local pt, _, rel, x, y = frame:GetPoint(1)
         BuffBarDB.point = { pt, "UIParent", rel, math.floor(x), math.floor(y) }
@@ -311,7 +342,16 @@ end
 
 function Bar:Rebuild()
     if InCombatLockdown() then
-        table.insert(addon.combatQueue, function() Bar:Rebuild() end)
+        -- Deduped: many events can request a rebuild during one fight
+        -- (bag updates, item-info arrivals) — one post-combat rebuild covers
+        -- them all.
+        if not self._rebuildQueued then
+            self._rebuildQueued = true
+            table.insert(addon.combatQueue, function()
+                Bar._rebuildQueued = nil
+                Bar:Rebuild()
+            end)
+        end
         return
     end
 
@@ -423,16 +463,18 @@ end
 -- active-hidden slot in the middle doesn't leave a gap. Returns the visible
 -- count so the caller can resize the bar and reposition the AddZone.
 function Bar:LayoutSlots()
+    -- Every tracked item gets a FIXED slot here - positions depend only on how
+    -- many items you track, never on buff state. "Hide when active" is applied as
+    -- an ALPHA fade in RefreshSlot instead of pulling the icon out of the row, so
+    -- a buff that fades mid-combat reappears instantly with NO secure re-layout
+    -- (which is blocked in combat and was why icons didn't come back in raids).
     local orient     = BuffBarDB.orientation or "horizontal"
     local lead       = LeadingOffset(BuffBarDB.locked)
-    local hideActive = BuffBarDB.hideWhenActive
     local sz         = SlotSize()
     local showLabel  = BuffBarDB.showLabel ~= false
     local visIdx     = 0
     for _, btn in ipairs(self.slots) do
-        local hasData = btn.itemID ~= nil
-        local hideIt  = hasData and hideActive and self:IsBuffActive(btn)
-        if hasData and not hideIt then
+        if btn.itemID ~= nil then
             visIdx = visIdx + 1
             btn:SetSize(sz, sz)                 -- pick up runtime size changes
             local off = lead + (visIdx - 1) * (sz + SLOT_GAP)
@@ -459,9 +501,15 @@ function Bar:LayoutSlots()
                     btn.labelFS:SetPoint("TOPLEFT", btn.durFS, "BOTTOMLEFT", 0, -1)
                 end
             end
-            btn:Show()
-        elseif hasData then
-            btn:Hide()         -- hidden by hideWhenActive, keep data
+            -- Respect hideWhenActive here too (LayoutSlots only runs out of
+            -- combat, where a real Hide is legal) — otherwise every rebuild
+            -- would flash hidden icons back on for a tick.
+            if BuffBarDB.hideWhenActive and BuffBarDB.locked
+               and self:IsBuffActive(btn) then
+                btn:Hide()
+            else
+                btn:Show()
+            end
         end
     end
     return visIdx
@@ -573,6 +621,12 @@ function Bar:ApplyLockState()
             newBarTop  = refMain + newLead + newHalf
             newBarLeft = refCross
         end
+        -- This position is SAVED — one bad geometry read (loading screen,
+        -- scale change) must never strand the bar off-screen permanently.
+        -- Clamp so at least a slot-sized corner always stays visible.
+        local sw, sh = UIParent:GetWidth(), UIParent:GetHeight()
+        newBarLeft = math.max(60 - mainLen, math.min(newBarLeft, sw - 60))
+        newBarTop  = math.max(40, math.min(newBarTop, sh))
         self.frame:ClearAllPoints()
         self.frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT",
             math.floor(newBarLeft), math.floor(newBarTop))
@@ -599,8 +653,49 @@ end
 
 -- ─── visual refresh ───────────────────────────────────────────────────────────
 
+-- Hide a slot AND gate its clickability in one place. The two must never
+-- disagree: an invisible slot that still takes clicks wastes consumables.
+--
+-- Two mechanisms depending on combat state:
+--   * OUT of combat: really Hide() the secure button. Zero mouse footprint —
+--     right-click camera panning works across the empty spot. (A mouse-
+--     enabled blocker would eat the drag, which is why it's combat-only.)
+--   * IN combat: Hide() on a secure frame is blocked, so fall back to
+--     alpha 0 + the insecure click-blocker. Costs camera-drag over those
+--     few icon-sized spots mid-fight, but guarantees no accidental /use.
+-- PrepareForCombat() converts hidden slots to the combat form right before
+-- lockdown starts (PLAYER_REGEN_DISABLED).
+local function SetSlotInert(btn, inert)
+    if InCombatLockdown() then
+        btn:SetAlpha(inert and 0 or 1)
+        if btn.blocker then
+            if inert then btn.blocker:Show() else btn.blocker:Hide() end
+        end
+    else
+        btn:SetAlpha(1)
+        if btn.blocker then btn.blocker:Hide() end
+        btn:SetShown(not inert)
+    end
+end
+
+-- Called on PLAYER_REGEN_DISABLED, while secure Show/Hide is still legal:
+-- convert really-hidden slots to shown-but-alpha-0 (+blocker) so they can
+-- reappear mid-fight the moment their buff fades. Without this they'd be
+-- stuck hidden until combat ends (the original raid bug).
+function Bar:PrepareForCombat()
+    for _, btn in ipairs(self.slots) do
+        if btn.itemID and not btn:IsShown() then
+            btn:SetAlpha(0)
+            if btn.blocker then btn.blocker:Show() end
+            btn:Show()
+        end
+    end
+end
+
 function Bar:RefreshSlot(btn)
-    if not btn.itemID or not btn:IsShown() then return end
+    -- No IsShown() gate: a really-hidden slot (out-of-combat hideWhenActive)
+    -- must still be re-evaluated so it re-Shows when its buff fades.
+    if not btn.itemID then return end
 
     local showCount    = BuffBarDB.showCount    ~= false
     local showDuration = BuffBarDB.showDuration ~= false
@@ -653,6 +748,7 @@ function Bar:RefreshSlot(btn)
         btn.durFS:SetTextColor(1, 1, 1)
         btn.overlay:Hide()
         btn.icon:SetDesaturated(false)
+        SetSlotInert(btn, false)        -- eat countdown is always visible
         return
     end
 
@@ -671,13 +767,21 @@ function Bar:RefreshSlot(btn)
             end
             btn.overlay:Hide()
             btn.icon:SetDesaturated(false)
+            -- "Hide when active": fade the icon out instead of removing it from
+            -- the row (alpha is combat-safe; a secure Hide()/re-layout is not).
+            -- Only while LOCKED - unlocked keeps everything visible for editing.
+            -- SetSlotInert also raises the click-blocker so the invisible
+            -- secure button can't consume the item on a stray right-click.
+            SetSlotInert(btn, BuffBarDB.hideWhenActive and BuffBarDB.locked or false)
         else
             btn.durFS:SetText("")
             if showRed then btn.overlay:Show() else btn.overlay:Hide() end
             btn.icon:SetDesaturated(true)
+            SetSlotInert(btn, false)   -- buff missing -> always visible
         end
     else
         btn.durFS:SetText("")
+        SetSlotInert(btn, false)      -- count-based items are never auto-hidden
         if cnt == 0 then
             if showRed then btn.overlay:Show() else btn.overlay:Hide() end
             btn.icon:SetDesaturated(true)
@@ -718,18 +822,13 @@ function Bar:_VisibleSignature()
 end
 
 function Bar:RefreshAll()
-    -- When hideWhenActive is on, buff state changes can alter the layout. Only
-    -- re-run ApplyLockState when the visible set actually changed — and never in
-    -- combat (ApplyLockState self-defers, but skipping here avoids the churn).
-    if BuffBarDB.hideWhenActive then
-        local sig = self:_VisibleSignature()
-        if sig ~= self._lastVisSig then
-            self._lastVisSig = sig
-            self:ApplyLockState()
-        end
-    end
+    -- Layout no longer depends on buff state (positions are fixed per tracked
+    -- item), so no secure re-layout is ever needed here - that deferred
+    -- re-layout was exactly what left faded buffs hidden in raids until
+    -- /reload. Iterate by itemID, NOT IsShown: really-hidden slots must be
+    -- repainted too so they come back when their buff drops.
     for _, btn in ipairs(self.slots) do
-        if btn:IsShown() then self:RefreshSlot(btn) end
+        if btn.itemID then self:RefreshSlot(btn) end
     end
 end
 
@@ -758,11 +857,27 @@ end
 -- Show or hide the entire bar based on the "instances only" setting and the
 -- player's current instance type. Called on PLAYER_ENTERING_WORLD (which
 -- fires on login, /reload, and any instance enter/leave) and on the menu
--- checkbox toggle. Skipped silently during combat — Show/Hide on a frame
--- with secure children isn't allowed mid-fight.
+-- checkbox toggle. Deferred during combat — Show/Hide on a frame with secure
+-- children isn't allowed mid-fight — and re-run the moment combat ends, so a
+-- bar that SHOULD be hidden never lingers on screen (invisible-but-clickable
+-- slots have eaten consumables before).
 function Bar:UpdateVisibility()
     if not self.frame then return end
-    if InCombatLockdown() then return end
+    if InCombatLockdown() then
+        if not self._visQueued then
+            self._visQueued = true
+            table.insert(addon.combatQueue, function()
+                Bar._visQueued = nil
+                Bar:UpdateVisibility()
+            end)
+        end
+        return
+    end
+    -- Manual hide takes priority over everything else.
+    if BuffBarDB.hidden then
+        self.frame:Hide()
+        return
+    end
     if not BuffBarDB.instancesOnly then
         self.frame:Show()
         return
@@ -837,6 +952,11 @@ function Bar:DetectNewBuff()
             -- Window expired
             btn._buffSnapshot = nil
             btn._snapshotTime = nil
+        elseif (GetItemCount(btn.itemID or 0) or 0) >= (btn._snapCount or 0) then
+            -- Click didn't consume the item (blocked, on cooldown, already
+            -- active, or a plain misclick) — NEVER rebind off procs that just
+            -- happen to land now. Keep the window open: the bag update can
+            -- lag a tick behind the aura event for a real consume.
         else
             -- Find the best new-or-refreshed self-applied buff
             -- (longest remaining duration). A buff is interesting if:

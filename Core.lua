@@ -18,6 +18,7 @@ local defaults = {
     showLabel      = true,
     instancesOnly  = false,
     centered       = false,         -- keep icons centred (row shrinks symmetrically)
+    hidden         = false,         -- hide the whole bar (toggle via menu or /bb show)
     font           = "Fonts\\FRIZQT__.TTF",
     activeProfile  = "Default",
     profiles       = nil,            -- created on first run, see ensureProfiles
@@ -28,7 +29,7 @@ local defaults = {
 local PROFILE_KEYS = {
     "items", "point", "locked", "orientation",
     "showCount", "showDuration", "showRedOverlay", "hideWhenActive",
-    "alpha", "iconSize", "showLabel", "instancesOnly", "centered", "font",
+    "alpha", "iconSize", "showLabel", "instancesOnly", "centered", "hidden", "font",
 }
 
 -- Words we DROP from the item name before picking a label.
@@ -212,7 +213,10 @@ function addon:_ApplyProfileSnapshot(snap)
     end
     if BuffBar.Bar.frame then
         local pt = BuffBarDB.point
-        if pt then
+        -- Validate before SetPoint: a corrupted snapshot point would throw
+        -- inside the PLAYER_LOGIN handler and abort the whole bar setup.
+        if type(pt) == "table" and type(pt[1]) == "string"
+           and type(pt[4]) == "number" and type(pt[5]) == "number" then
             BuffBar.Bar.frame:ClearAllPoints()
             BuffBar.Bar.frame:SetPoint(pt[1], UIParent, pt[3], pt[4], pt[5])
         end
@@ -618,20 +622,14 @@ function addon:_FinishAdd(itemID, slot)
     })
     if InCombatLockdown() then
         self:Print("Cannot change bar in combat; changes apply after combat.")
-        table.insert(self.combatQueue, function() BuffBar.Bar:Rebuild() end)
-    else
-        BuffBar.Bar:Rebuild()
     end
+    BuffBar.Bar:Rebuild()   -- self-queues (deduped) when in combat
 end
 
 function addon:RemoveItem(index)
     if not BuffBarDB.items[index] then return end
     table.remove(BuffBarDB.items, index)
-    if InCombatLockdown() then
-        table.insert(self.combatQueue, function() BuffBar.Bar:Rebuild() end)
-    else
-        BuffBar.Bar:Rebuild()
-    end
+    BuffBar.Bar:Rebuild()   -- self-queues (deduped) when in combat
 end
 
 -- ─── events ──────────────────────────────────────────────────────────────────
@@ -642,6 +640,7 @@ ev:RegisterEvent("BAG_UPDATE_DELAYED")
 ev:RegisterEvent("UNIT_AURA")
 ev:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 ev:RegisterEvent("PLAYER_REGEN_ENABLED")
+ev:RegisterEvent("PLAYER_REGEN_DISABLED")
 ev:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 ev:RegisterEvent("PLAYER_ENTERING_WORLD")
 ev:RegisterEvent("UNIT_INVENTORY_CHANGED")     -- weapon temp enchants
@@ -671,6 +670,11 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         BuffBar.Bar:UpdateVisibility()
 
     elseif event == "BAG_UPDATE_DELAYED" then
+        -- Also run buff detection here: the rebind gate needs the bag count
+        -- to have DROPPED, and the aura event can arrive before the bag
+        -- update does. When the count finally drops this re-scans, so the
+        -- binding happens regardless of which event lands first.
+        BuffBar.Bar:DetectNewBuff()
         BuffBar.Bar:RefreshAll()
 
     elseif event == "UNIT_INVENTORY_CHANGED" or event == "PLAYER_EQUIPMENT_CHANGED" then
@@ -697,10 +701,23 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
             BuffBar.Bar:RefreshAll()
         end
 
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        -- Fires just BEFORE combat lockdown: last legal moment to Show/Hide
+        -- secure buttons. Convert really-hidden slots to their combat form
+        -- (alpha 0 + click-blocker) so they can reappear mid-fight.
+        BuffBar.Bar:PrepareForCombat()
+
     elseif event == "PLAYER_REGEN_ENABLED" then
+        -- pcall each entry: one failure must not silently drop the REST of
+        -- the queued updates (that left the bar stale until /reload).
         local q = addon.combatQueue
         addon.combatQueue = {}
-        for _, fn in ipairs(q) do fn() end
+        for _, fn in ipairs(q) do
+            local ok, err = pcall(fn)
+            if not ok then
+                addon:Print("Post-combat update failed: " .. tostring(err))
+            end
+        end
 
     elseif event == "GET_ITEM_INFO_RECEIVED" then
         local itemID, success = a1, a2
@@ -711,9 +728,10 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
                     entry.spellName = addon:ResolveSpell(itemID)
                 end
             end
-            if not InCombatLockdown() then
-                BuffBar.Bar:Rebuild()
-            end
+            -- Rebuild self-queues (deduped) when in combat, so the late item
+            -- info is never dropped — the "?" icon used to stay until the
+            -- next unrelated rebuild.
+            BuffBar.Bar:Rebuild()
         end
     end
 end)
@@ -732,6 +750,14 @@ SlashCmdList.BUFFBAR = function(msg)
         BuffBarDB.locked = false
         BuffBar.Bar:Rebuild()
         addon:Print("Bar unlocked. Drag handle to move.")
+    elseif msg == "hide" then
+        BuffBarDB.hidden = true
+        BuffBar.Bar:UpdateVisibility()
+        addon:Print("Bar hidden. Type /bb show to bring it back.")
+    elseif msg == "show" then
+        BuffBarDB.hidden = false
+        BuffBar.Bar:UpdateVisibility()
+        addon:Print("Bar shown.")
     elseif msg == "clear" then
         if InCombatLockdown() then addon:Print("Cannot clear in combat.") return end
         BuffBarDB.items = {}
