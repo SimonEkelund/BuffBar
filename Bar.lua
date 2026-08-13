@@ -381,6 +381,7 @@ function Bar:Rebuild()
             -- from the item tooltip ("spend at least N seconds eating"), so the
             -- countdown is exact per food — defaulting to 10s if not yet cached.
             btn._isFood = (subType == "Food & Drink")
+                          or addon.Consumables:IsFood(entry.itemID)
             if btn._isFood then
                 btn._sitTime = addon:GetFoodSitTime(entry.itemID) or 10
             else
@@ -737,10 +738,14 @@ function Bar:RefreshSlot(btn)
     -- globally in DetectNewBuff, so this works no matter how the food was eaten.
     -- The real buff takes over the instant it lands (then hides if "Hide when
     -- active" is on); if you stand up early the countdown clears on its own.
-    if btn._isFood and not buffUp and self._eatStart and self._eatUntil
-       and now < self._eatUntil then
-        local rem = (self._eatStart + (btn._sitTime or 10)) - now
-        if rem < 0 then rem = 0 end
+    -- Only while the eating aura is genuinely still on you AND the sit time
+    -- hasn't already elapsed. The old version ran until the ~30s eating aura
+    -- expired, so once the slot was mis-bound the timer sat at "0s" long
+    -- after the meal — the "food timer starts and doesn't disappear" bug.
+    local eatRem = (btn._isFood and self._eatStart and self._eatUntil)
+                   and ((self._eatStart + (btn._sitTime or 10)) - now) or nil
+    if eatRem and not buffUp and now < self._eatUntil and eatRem > 0 then
+        local rem = eatRem
         -- Always shown, even when "show duration" is off — this is a transient
         -- "keep sitting" prompt, not the normal buff timer, so it deliberately
         -- writes over that setting until Well Fed lands.
@@ -925,10 +930,11 @@ function Bar:DetectNewBuff()
     -- (expiration - duration of the aura) so any food slot can count down to
     -- Well Fed — even if you ate from the bag/a keybind and never touched the
     -- BuffBar icon. Both are cleared the moment the aura is gone.
-    local eatUntil, eatStart = nil, nil
+    local eatUntil, eatStart, wellFed = nil, nil, false
     for i = 1, 40 do
         local name, _, _, _, duration, expiration = UnitBuff("player", i)
         if not name then break end
+        if name == "Well Fed" then wellFed = true end
         if EATING_BUFFS[name] and expiration and expiration > now then
             if not eatUntil or expiration > eatUntil then
                 eatUntil = expiration
@@ -942,11 +948,27 @@ function Bar:DetectNewBuff()
             end
         end
     end
+    -- Well Fed landed => the meal is done, kill the countdown immediately
+    -- rather than letting it run out the remaining eating-aura time.
+    if wellFed then eatUntil, eatStart = nil, nil end
     self._eatUntil = eatUntil
     self._eatStart = eatStart
 
+    -- Every aura already claimed by a slot. A new binding may never steal one
+    -- of these — that is precisely how both Scroll slots ended up bound to
+    -- "Elixir of the Mongoose" and hid whenever the elixir was up.
+    local claimed = {}
+    for _, b in ipairs(self.slots) do
+        if b.itemID and b.spellName then claimed[b.spellName] = true end
+    end
+
     for _, btn in ipairs(self.slots) do
-        if not btn._buffSnapshot or not btn.slotIndex then
+        local entry = btn.slotIndex and BuffBarDB.items[btn.slotIndex]
+        if entry and entry.bindSource == "data" then
+            -- Authoritative binding from Consumables.lua — never auto-rebind.
+            btn._buffSnapshot = nil
+            btn._snapshotTime = nil
+        elseif not btn._buffSnapshot or not btn.slotIndex then
             -- skip
         elseif (now - (btn._snapshotTime or 0)) > SNAPSHOT_WINDOW then
             -- Window expired
@@ -970,7 +992,11 @@ function Bar:DetectNewBuff()
                 local fresh    = (snapExp == nil) or
                                  (expiration and expiration > snapExp + 1)
                 local selfCast = (source == "player" or source == nil)
+                -- `claimed` blocks stealing another slot's aura; the eating
+                -- blacklist blocks the transient Food/Drink auras.
                 if fresh and selfCast and not EATING_BUFFS[name]
+                   and not claimed[name]
+                   and not addon.Consumables:IsBlacklisted(name)
                    and expiration and expiration > bestExp then
                     bestName = name
                     bestExp  = expiration
@@ -985,7 +1011,8 @@ function Bar:DetectNewBuff()
             if bestName and bestName ~= btn.spellName then
                 btn.spellName = bestName
                 if BuffBarDB.items[btn.slotIndex] then
-                    BuffBarDB.items[btn.slotIndex].spellName = bestName
+                    BuffBarDB.items[btn.slotIndex].spellName  = bestName
+                    BuffBarDB.items[btn.slotIndex].bindSource = "learned"
                 end
                 addon:Print("Bound buff '" .. bestName ..
                     "' to slot " .. btn.slotIndex)

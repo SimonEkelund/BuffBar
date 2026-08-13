@@ -499,11 +499,48 @@ end
 
 -- ─── item add / remove ───────────────────────────────────────────────────────
 
--- Try every form GetItemSpell accepts so we maximize the chance of resolving.
+-- Resolve the aura an item applies, in priority order:
+--   1. Consumables.lua data  (authoritative — auto-detect may never override)
+--   2. GetItemSpell          (right for most flasks/elixirs; still trusted
+--                             over auto-detect, but replaceable by data)
+--   3. nil                   (unknown item — runtime detection may learn it)
+-- Second return is the binding SOURCE, stored on the entry so DetectNewBuff
+-- knows what it is allowed to touch.
 function addon:ResolveSpell(itemID)
+    local known, authoritative = self.Consumables:BuffFor(itemID)
+    if known and authoritative then return known, "data" end
+
     local _, link = GetItemInfo(itemID)
     local s = (link and GetItemSpell(link)) or GetItemSpell(itemID)
-    return s
+    if s and not self.Consumables:IsBlacklisted(s) then return s, "item" end
+
+    return nil, nil
+end
+
+-- Re-derive every binding from the data table and fix any that disagree.
+-- Runs at login, on entering the world, and after every combat — so a slot
+-- that got mis-bound (or an item that finished caching mid-fight) is always
+-- corrected without a /reload. Returns how many bindings changed.
+function addon:RepairBindings()
+    local fixed = 0
+    for _, entry in ipairs(BuffBarDB.items or {}) do
+        if not entry.slot then          -- weapon/chest slots don't use auras
+            local want, source = self:ResolveSpell(entry.itemID)
+            -- Only overwrite when we have an authoritative answer, or when
+            -- the slot has no binding at all. Never clobber a learned binding
+            -- with a nil (item not cached yet).
+            if want and (source == "data" or not entry.spellName) then
+                if entry.spellName ~= want then
+                    entry.spellName = want
+                    fixed = fixed + 1
+                end
+                entry.bindSource = source
+            elseif entry.spellName and not entry.bindSource then
+                entry.bindSource = "learned"
+            end
+        end
+    end
+    return fixed
 end
 
 -- "Apply-to-weapon" items: sharpening stones, weightstones, mana / wizard oils,
@@ -611,14 +648,15 @@ function addon:AddItem(itemID)
 end
 
 function addon:_FinishAdd(itemID, slot)
-    local spellName = self:ResolveSpell(itemID)
+    local spellName, source = self:ResolveSpell(itemID)
     if not spellName then
         addon.pendingItems[itemID] = true
     end
     table.insert(BuffBarDB.items, {
-        itemID    = itemID,
-        spellName = spellName,
-        slot      = slot,    -- nil = consume directly; 16/17 = weapon slot
+        itemID     = itemID,
+        spellName  = spellName,
+        bindSource = source,  -- "data" = authoritative, never auto-rebound
+        slot       = slot,    -- nil = consume directly; 16/17 = weapon slot
     })
     if InCombatLockdown() then
         self:Print("Cannot change bar in combat; changes apply after combat.")
@@ -660,11 +698,13 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
         BuffBar.Bar:UpdateVisibility()
 
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- bags and auras are guaranteed ready here; re-resolve spellNames
-        for _, entry in ipairs(BuffBarDB.items) do
-            if not entry.spellName then
-                entry.spellName = addon:ResolveSpell(entry.itemID)
-            end
+        -- Bags and auras are guaranteed ready here. Re-derive every binding
+        -- from the data table, which also repairs anything the old
+        -- auto-detect mis-bound in a previous session.
+        local fixed = addon:RepairBindings()
+        if fixed > 0 then
+            addon:Print(("Corrected %d buff binding%s.")
+                :format(fixed, fixed == 1 and "" or "s"))
         end
         if BuffBar.Bar.frame then BuffBar.Bar:Rebuild() end
         BuffBar.Bar:UpdateVisibility()
@@ -718,16 +758,21 @@ ev:SetScript("OnEvent", function(_, event, a1, a2)
                 addon:Print("Post-combat update failed: " .. tostring(err))
             end
         end
+        -- Full post-combat re-verify. Aura events can be missed in the noise
+        -- of a raid fight, and anything that dropped mid-combat must show as
+        -- missing the moment the fight ends. Re-derive bindings, then repaint
+        -- every slot from the CURRENT aura state.
+        addon:RepairBindings()
+        BuffBar.Bar:DetectNewBuff()
+        BuffBar.Bar:RefreshAll()
 
     elseif event == "GET_ITEM_INFO_RECEIVED" then
         local itemID, success = a1, a2
         if addon.pendingItems[itemID] and success then
             addon.pendingItems[itemID] = nil
-            for _, entry in ipairs(BuffBarDB.items) do
-                if entry.itemID == itemID and not entry.spellName then
-                    entry.spellName = addon:ResolveSpell(itemID)
-                end
-            end
+            -- The item's name/subtype are only NOW known, so the data table
+            -- can finally classify it (food -> Well Fed, scroll -> stat).
+            addon:RepairBindings()
             -- Rebuild self-queues (deduped) when in combat, so the late item
             -- info is never dropped — the "?" icon used to stay until the
             -- next unrelated rebuild.

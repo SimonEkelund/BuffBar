@@ -6,6 +6,7 @@
 ## SavedVariables: BuffBarDB
 ## SavedVariablesPerCharacter: BuffBarCharDB
 
+Consumables.lua
 Core.lua
 Bar.lua
 AddZone.lua
